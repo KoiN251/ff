@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>uav_msgs</name>
+  <version>0.0.1</version>
+  <description>Custom UAV messages</description>
+  <maintainer email="you@example.com">you</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <!-- build tools -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <!-- runtime for generated interfaces -->
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <!-- BẮT BUỘC đối với gói interface -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+

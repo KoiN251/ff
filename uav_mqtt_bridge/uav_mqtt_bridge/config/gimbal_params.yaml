@@ -1,0 +1,35 @@
+px4_mqtt_heartbeat:
+  ros__parameters:
+    vehicle_id: "uav3"
+
+    # MQTT broker connection
+    mqtt_host: "d9af036f37434598a035dd87cb93f1eb.s1.eu.hivemq.cloud"
+    mqtt_port: 8883
+    mqtt_user: "nhutctuav"
+    mqtt_pass: "123456Aa"
+    mqtt_use_tls: true
+
+    # MQTT topics
+    command_topic: "uav3/cmd"
+    target_global_topic: "uav3/target_global"
+    user_cmd_topic: "uav3/user_cmd"
+    event_topic: "station1/event"
+    topic: "station1/telemetry"
+    heartbeat_topic: "uav3/heartbeat"
+
+    # Publish rates (Hz)
+    rate_hz: 5.0
+    heartbeat_rate_hz: 2.0
+
+    # ROS subscriptions
+    event_sub_topic: "/event_uav"
+
+    # Gimbal connection
+    gimbal_enable: true
+    gimbal_host: "192.168.144.25"
+    gimbal_port: 37260
+    gimbal_debug: false
+
+    # Optional log files (set to "" to disable)
+    logger_output_file: ""
+    command_log_file: ""

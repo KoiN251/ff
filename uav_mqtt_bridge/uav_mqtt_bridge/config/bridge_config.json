@@ -1,0 +1,57 @@
+{
+  "defaults": {
+    "mqtt": {
+      "host": "d9af036f37434598a035dd87cb93f1eb.s1.eu.hivemq.cloud",
+      "port": 8883,
+      "user": "nhutctuav",
+      "password": "123456Aa",
+      "use_tls": true,
+      "command_topic": "{vehicle_id}/cmd",
+      "target_topic": "{vehicle_id}/target_global",
+      "user_cmd_topic": "{vehicle_id}/user_cmd",
+      "event_topic": "station1/event"
+    },
+    "telemetry": {
+      "status_topic": "station1/heartbeat",
+      "status_rate_hz": 5.0,
+      "heartbeat_topic": "{vehicle_id}/heartbeat",
+      "heartbeat_rate_hz": 1.0
+    },
+    "gimbal": {
+      "enable": true,
+      "host": "192.168.144.25",
+      "port": 37260,
+      "debug": false
+    },
+    "video": {
+      "enabled": true,
+      "control_topic": "/video_stream/cmd",
+      "stream_value": "rtsp://34.56.241.85:8554/a8",
+      "command": "ffmpeg -hide_banner -nostdin -loglevel warning -rtsp_transport tcp -use_wallclock_as_timestamps 1 -i rtsp://192.168.144.25:8554/main.264 -fflags +genpts -c copy -f rtsp -rtsp_transport tcp rtsp://34.56.241.85:8554/a8",
+      "use_terminal": true,
+      "terminal_program": "gnome-terminal"
+    },
+    "logging": {
+      "node_log": "",
+      "command_log": ""
+    }
+  },
+  "vehicles": {
+    "uav3": {
+      "vehicle_id": "uav3"
+    },
+    "uav_fixedwing": {
+      "vehicle_id": "uav_fixedwing",
+      "telemetry": {
+        "status_rate_hz": 2.0,
+        "heartbeat_topic": "fixedwing/heartbeat"
+      },
+      "gimbal": {
+        "enable": false
+      },
+      "video": {
+        "enabled": false
+      }
+    }
+  }
+}

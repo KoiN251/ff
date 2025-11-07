@@ -1,0 +1,44 @@
+{
+  "mission_example": {
+    "connect": true,
+    "set_home": false,
+    "arm": true,
+    "pause": false,
+    "continue": false,
+    "rtl": false,
+    "mission": true,
+    "waypoint": [
+      { "lat": 10.033456, "lon": 105.768912, "alt": 35.0 },
+      { "lat": 10.034021, "lon": 105.769845, "alt": 40.0 }
+    ],
+    "flag": "mission_a",
+      "gimbal": true,
+      "angle": { "pitch": -10.0, "yaw": 45.0 }
+  },
+  "rtl_example": {
+    "connect": true,
+    "set_home": false,
+    "arm": true,
+    "pause": false,
+    "continue": false,
+    "rtl": true,
+    "mission": false,
+    "waypoint": [],
+    "flag": "rtl_now",
+    "gimbal": false,
+    "angle": null
+  },
+  "gimbal_center": {
+    "connect": false,
+    "set_home": false,
+    "arm": false,
+    "pause": false,
+    "continue": false,
+    "rtl": false,
+    "mission": false,
+    "waypoint": [],
+    "flag": "gimbal",
+    "gimbal": true,
+    "angle": null
+  }
+}
