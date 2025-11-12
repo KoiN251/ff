@@ -17,11 +17,12 @@ try:
 except ImportError:  # pragma: no cover
     from siyi_sdk import SIYISDK  # type: ignore
 
-from .payload_actions import (
+from .videostream_actions import (
     stop_video_stream as payload_stop_video_stream,
     load_payload_config,
     handle_payload_action,
 )
+from .image_capture import ImageCaptureManager, load_image_capture_config
 
 # ---- QoS (BEST_EFFORT, depth=1) ----
 qos_px4 = QoSProfile(
@@ -162,6 +163,8 @@ class Px4MqttHeartbeat(Node):
             "event_sub_topic", "/event_uav"
         ).value
         self.payload_cfg = load_payload_config(self)
+        self.image_capture_cfg = load_image_capture_config(self, vehicle_id=self.vehicle_id)
+
         self.telemetry_topic = self.declare_parameter(
             "topic", f"{self.vehicle_id}/telemetry"
         ).value
@@ -187,6 +190,22 @@ class Px4MqttHeartbeat(Node):
         self.mqtt.loop_start()
 
         # ---- ROS2 subs ----
+        self.image_capture_mgr: ImageCaptureManager | None = None
+        try:
+            self.image_capture_mgr = ImageCaptureManager(
+                root_dir=self.image_capture_cfg.root_dir,
+                capture_interval=self.image_capture_cfg.capture_interval,
+                camera_index=self.image_capture_cfg.camera_index,
+                jpeg_quality=self.image_capture_cfg.jpeg_quality,
+                upload_to_s3=self.image_capture_cfg.upload,
+                bucket_name=self.image_capture_cfg.bucket,
+                s3_prefix=self.image_capture_cfg.prefix,
+                remove_after_upload=self.image_capture_cfg.remove_after_upload,
+                logger=self.get_logger(),
+            )
+        except Exception as exc:
+            self.get_logger().error(f"Image capture manager unavailable: {exc}")
+
         self.last_gps: VehicleGlobalPosition | None = None
         self.last_status: VehicleStatus | None = None
         self.last_att: VehicleAttitude | None = None
@@ -257,12 +276,43 @@ class Px4MqttHeartbeat(Node):
         self._handle_payload_event(active)
 
     def _handle_payload_event(self, active: bool):
+        if self.payload_cfg.mode == "image":
+            self._handle_image_payload(active)
+            return
+
         handle_payload_action(
             active=active,
             config=self.payload_cfg,
             logger=self.get_logger(),
             publish_video_cb=self.publish_video_stream_event,
         )
+
+    def _handle_image_payload(self, active: bool):
+        if self.image_capture_mgr is None:
+            self.get_logger().warning("Image capture requested but manager unavailable")
+            return
+
+        if active:
+            if self.image_capture_mgr.is_running:
+                self.get_logger().debug("Image capture already active; ignore duplicate request")
+                return
+            lat = lon = alt = None
+            if self.last_gps is not None:
+                lat = norm_lat(self.last_gps.lat)
+                lon = norm_lon(self.last_gps.lon)
+                alt = norm_alt(self.last_gps.alt)
+            started = self.image_capture_mgr.start_session(lat=lat, lon=lon, alt=alt)
+            if started:
+                self.publish_image_status("start send image")
+            else:
+                self.get_logger().warning("Failed to start image capture session")
+            return
+
+        if not self.image_capture_mgr.is_running:
+            return
+
+        sent = self.image_capture_mgr.stop_session()
+        self.publish_image_status(f"send {sent} image")
 
     # ---------- MQTT commands ----------
     def on_mqtt_message(self, client, userdata, msg):
@@ -396,6 +446,10 @@ class Px4MqttHeartbeat(Node):
             )
             yaw_align_angle_val = 0.0
 
+        requested_media_mode = self._extract_media_mode(data)
+        if requested_media_mode:
+            self.payload_cfg.mode = requested_media_mode
+
         cmd = {
             "connect": bool(data["connect"]),
             "set_home": bool(data["set_home"]),
@@ -411,6 +465,7 @@ class Px4MqttHeartbeat(Node):
             "gimbal_yaw": gimbal_yaw,
             "yaw_align": yaw_align_cmd,
             "yaw_align_angle": yaw_align_angle_val,
+            "media_mode": self.payload_cfg.mode,
         }
 
         with self.command_lock:
@@ -443,7 +498,8 @@ class Px4MqttHeartbeat(Node):
             f"pause={cmd['pause']} resume={cmd['resume']} rtl={cmd['rtl']} "
             f"mission={cmd['mission']} flag={cmd['flag']} "
             f"gimbal={cmd['gimbal']} pitch={cmd['gimbal_pitch']} yaw={cmd['gimbal_yaw']} "
-            f"yaw_align={cmd['yaw_align']} yaw_align_angle={cmd['yaw_align_angle']}"
+            f"yaw_align={cmd['yaw_align']} yaw_align_angle={cmd['yaw_align_angle']} "
+            f"media_mode={cmd['media_mode']}"
         )
 
 #loss connect cloud check
@@ -497,6 +553,26 @@ class Px4MqttHeartbeat(Node):
             self.get_logger().error(
                 f"Failed to publish RTL command after MQTT loss: {exc}"
             )
+
+    def _extract_media_mode(self, data: dict) -> Optional[str]:
+        raw = data.get("media_mode")
+        if raw is None:
+            raw = data.get("payload_mode")
+        if raw is None:
+            raw = data.get("image_mode")
+
+        if raw is None:
+            return None
+
+        if isinstance(raw, bool):
+            return "image" if raw else "video_stream"
+
+        value = str(raw).strip().lower()
+        if value in ("image", "images", "photo", "picture"):
+            return "image"
+        if value in ("video", "video_stream", "stream"):
+            return "video_stream"
+        return None
 ##
     def publish_target_global(self, waypoint_list):
         if not waypoint_list:
@@ -669,14 +745,37 @@ class Px4MqttHeartbeat(Node):
             "gps": gps_block,
         }
 
+    # ---------- Payload media ----------
     def publish_video_stream_event(self):
+        self._publish_media_event(
+            media_type="video_stream",
+            media_value=self.payload_cfg.stream.video_value,
+            log_label="video stream",
+        )
+
+    def publish_image_status(self, message: str):
+        self._publish_media_event(
+            media_type="image_capture",
+            media_value=message,
+            log_label=message,
+        )
+
+    def shutdown_media_stream(self):
+        payload_stop_video_stream(logger=self.get_logger())
+
+    def shutdown_image_capture(self):
+        if self.image_capture_mgr is None:
+            return
+        self.image_capture_mgr.shutdown()
+
+    def _publish_media_event(self, media_type: str, media_value, log_label: str):
         if not self.event_topic:
             return
 
         payload = {
             "id": self.vehicle_id,
-            "type": "video_stream",
-            "value": self.payload_cfg.stream.video_value,
+            "type": media_type,
+            "value": media_value,
             "flag": "",
             "location": self._build_location(),
             "timestamp": self._current_timestamp(),
@@ -686,11 +785,11 @@ class Px4MqttHeartbeat(Node):
             self.mqtt.publish(self.event_topic, json.dumps(payload), qos=1)
         except Exception as exc:
             self.get_logger().error(
-                f"MQTT video stream publish error to '{self.event_topic}': {exc}"
+                f"MQTT media publish error ({media_type}) to '{self.event_topic}': {exc}"
             )
         else:
             self.get_logger().info(
-                f"Sent event 'video stream' value={self.payload_cfg.stream.video_value} to '{self.event_topic}'"
+                f"Sent event '{log_label}' value={media_value} to '{self.event_topic}'"
             )
 
     def publish_event(self, event_type: str, value):
@@ -801,7 +900,8 @@ class Px4MqttHeartbeat(Node):
 
     # ---------- Shutdown ----------
     def destroy_node(self):
-        payload_stop_video_stream(logger=self.get_logger())
+        self.shutdown_media_stream()
+        self.shutdown_image_capture()
         try:
             self.mqtt.loop_stop()
             self.mqtt.disconnect()
