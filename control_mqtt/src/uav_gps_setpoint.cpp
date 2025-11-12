@@ -55,11 +55,15 @@ bool user_cmd_pause = false;
 bool user_cmd_continue = false;
 bool user_cmd_set_home = false;
 
+bool user_cmd_yaw_align = false;
+float user_cmd_yaw_angle = 0.0;
+
 bool land_detect = false;
 
 /////PAYLOAD
 int target_index = 0;
 int target_reach = NAN; // --- IGNORE ---
+bool payload_release = false; // --- IGNORE ---
 
 // yaw face-to-target 
 inline float bearing_gps_rad(double lat_cur_deg, double lon_cur_deg,
@@ -223,6 +227,8 @@ void Subscription::uav_user_cmd_subscriber()
             user_cmd_pause = msg->pause;
             user_cmd_continue = msg->resume;
             user_cmd_set_home = msg->set_home;
+            user_cmd_yaw_align = msg->yaw_align;
+            user_cmd_yaw_angle = msg->yaw_align_angle;
             //pause mode
             if (user_cmd_pause) 
             {
@@ -244,6 +250,16 @@ void Subscription::uav_user_cmd_subscriber()
                 state_ = State::RTL;
                 RCLCPP_INFO(this->get_logger(), "User command: RTL");
             }
+            if((user_cmd_yaw_align) && (state_ == State::NONE)) 
+            {
+                RCLCPP_INFO(this->get_logger(),"start yaw_align");
+            }
+            else
+            {
+                RCLCPP_INFO(this->get_logger(),"cannot yaw_align");
+                user_cmd_yaw_align = false;
+            }
+            
 
         });
 }
@@ -301,18 +317,6 @@ void Subscription::vehicle_status_subscriber()
 
             // logic : khi chuyển sang armed lần đầu -> chốt home.
                 armed = (msg->arming_state == VehicleStatus::ARMING_STATE_ARMED);
-                if (armed && !home_locked & land_detect) {
-
-                    home_lat = lat_cur;
-                    home_lon = lon_cur;
-                    home_alt = alt_cur;
-
-                    home_locked = true;
-
-                    RCLCPP_INFO(this->get_logger(),
-                        "Home locked @ ARM: lat=%.7f lon=%.7f alt=%.2f",
-                        home_lat, home_lon, home_alt);
-                }
         });
 }
 void Subscription::vehicle_home_position_subscriber()
@@ -339,7 +343,8 @@ class OffboardControl : public rclcpp::Node
         OffboardControl() : Node("offboard_control")
         {
             publisher();
-            event_publisher();
+            event_update();
+            mission();
             auto timer_callback = [this]() -> void {
                 position_setpoint();
             };
@@ -347,8 +352,8 @@ class OffboardControl : public rclcpp::Node
         }
     private:
         void publisher();
-        void event_publisher();
         void event_update();
+        void mission();
         void publish_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
 
         void take_off(float alt_takeoff);
@@ -371,7 +376,7 @@ class OffboardControl : public rclcpp::Node
 
 void OffboardControl::position_setpoint()
 {
-    // truong hop khi may tinh restart trong khi uav dang thuc hien mission
+
     if(!land_detect && !home_locked)
     {
         home_lat = px4_home_lat;
@@ -401,6 +406,7 @@ void OffboardControl::position_setpoint()
         {
             RCLCPP_INFO(this->get_logger(), "CANNOT SET HOME, NOT LAND DETECTED");
         }
+        user_cmd_set_home = false;
     }
         
     switch (state_) {
@@ -409,7 +415,38 @@ void OffboardControl::position_setpoint()
                 
                 publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0f, 0.0f);
                 RCLCPP_INFO(this->get_logger(), "User command: ARM");
+
+                home_lat = lat_cur;
+                home_lon = lon_cur;
+                home_alt = alt_cur;
+
+                home_locked = true;
+
+                RCLCPP_INFO(this->get_logger(),
+                    "Home locked @ ARM: lat=%.7f lon=%.7f alt=%.2f",
+                    home_lat, home_lon, home_alt);
+
                 user_cmd_arm = false;
+            }
+            //USER_CMD_YAW_ALIGN
+            if(user_cmd_yaw_align)
+            {
+                if(!land_detect)
+                {
+                    yaw_adjust(lat_cur, lon_cur, alt_cur, user_cmd_yaw_angle * M_PI/180);
+
+                    if (std::fabs(user_cmd_yaw_angle - yaw) < 10*M_PI/180.0f) // 10 độ
+                    {
+                        RCLCPP_INFO(this->get_logger(),"yaw align done");
+                        user_cmd_yaw_align = false;
+                    }
+                }
+                else
+                {
+                    RCLCPP_INFO(this->get_logger(),"cannot yaw_align");
+                    user_cmd_yaw_align = false;
+
+                }
             }
             break;
             }
@@ -478,6 +515,7 @@ void OffboardControl::position_setpoint()
 
             if (distance_to_goal < 0.7) // trong bán kính 1m
                 {
+                    payload_release = true;
                     RCLCPP_INFO(this->get_logger(), "Reached target %d", target_index + 1);
                     event_update();
 
@@ -504,6 +542,8 @@ void OffboardControl::position_setpoint()
             break;
         }
         case State::RTL: {
+            payload_release = false;
+            mission();
             if (armed) {
                 // RTL về home, thong so chinh trong para
                 return_to_launch();
@@ -527,16 +567,19 @@ void OffboardControl::position_setpoint()
 void OffboardControl::publisher()
 {
     vehicle_command_publisher_ = this->create_publisher<VehicleCommand>("/fmu/in/vehicle_command", 10);
-}
-
-void OffboardControl::event_publisher()
-{
     event_publisher_ = this->create_publisher<uav_msgs::msg::EventUav>("/event_uav", 10);
-}
 
+}
+void OffboardControl::mission()
+{
+    uav_msgs::msg::EventUav event_msg{};
+    event_msg.payload_action = payload_release;    
+    event_publisher_->publish(event_msg);
+}  
 void OffboardControl::event_update()
 {
-     uav_msgs::msg::EventUav event_msg{};
+    uav_msgs::msg::EventUav event_msg{};
+    event_msg.payload_action = payload_release;    
     event_msg.target_reach =  static_cast<uint32_t>(target_index + 1);
     event_publisher_->publish(event_msg);
 }

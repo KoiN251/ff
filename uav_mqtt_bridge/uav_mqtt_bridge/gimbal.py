@@ -17,6 +17,12 @@ try:
 except ImportError:  # pragma: no cover
     from siyi_sdk import SIYISDK  # type: ignore
 
+from .payload_actions import (
+    stop_video_stream as payload_stop_video_stream,
+    load_payload_config,
+    handle_payload_action,
+)
+
 # ---- QoS (BEST_EFFORT, depth=1) ----
 qos_px4 = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -155,6 +161,7 @@ class Px4MqttHeartbeat(Node):
         self.event_sub_topic = self.declare_parameter(
             "event_sub_topic", "/event_uav"
         ).value
+        self.payload_cfg = load_payload_config(self)
         self.telemetry_topic = self.declare_parameter(
             "topic", f"{self.vehicle_id}/telemetry"
         ).value
@@ -246,6 +253,16 @@ class Px4MqttHeartbeat(Node):
 
     def cb_event(self, msg: EventUav):
         self.publish_event("target reach", msg.target_reach)
+        active = bool(getattr(msg, "payload_action", False))
+        self._handle_payload_event(active)
+
+    def _handle_payload_event(self, active: bool):
+        handle_payload_action(
+            active=active,
+            config=self.payload_cfg,
+            logger=self.get_logger(),
+            publish_video_cb=self.publish_video_stream_event,
+        )
 
     # ---------- MQTT commands ----------
     def on_mqtt_message(self, client, userdata, msg):
@@ -360,6 +377,25 @@ class Px4MqttHeartbeat(Node):
             if len(numeric_vals) >= 2:
                 gimbal_yaw = numeric_vals[1]
 
+        raw_yaw_align_flag = data.get("yaw_align", False)
+        if isinstance(raw_yaw_align_flag, bool):
+            yaw_align_cmd = raw_yaw_align_flag
+        elif isinstance(raw_yaw_align_flag, str):
+            yaw_align_cmd = raw_yaw_align_flag.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            yaw_align_cmd = bool(raw_yaw_align_flag)
+
+        yaw_align_angle = data.get("yaw_align_angle")
+        try:
+            yaw_align_angle_val = float(yaw_align_angle)
+        except (TypeError, ValueError):
+            yaw_align_angle_val = None
+        if yaw_align_cmd and yaw_align_angle_val is None:
+            self.get_logger().warning(
+                "yaw_align command received without valid yaw_align_angle; defaulting to 0"
+            )
+            yaw_align_angle_val = 0.0
+
         cmd = {
             "connect": bool(data["connect"]),
             "set_home": bool(data["set_home"]),
@@ -373,6 +409,8 @@ class Px4MqttHeartbeat(Node):
             "gimbal": gimbal_cmd,
             "gimbal_pitch": gimbal_pitch,
             "gimbal_yaw": gimbal_yaw,
+            "yaw_align": yaw_align_cmd,
+            "yaw_align_angle": yaw_align_angle_val,
         }
 
         with self.command_lock:
@@ -383,7 +421,17 @@ class Px4MqttHeartbeat(Node):
         if cmd["mission"]:
             self.publish_target_global(waypoint)
 
-        if cmd["arm"] or cmd["pause"] or cmd["resume"] or cmd["rtl"] or cmd["set_home"]:
+        should_publish_user_cmd = any(
+            (
+                cmd["arm"],
+                cmd["pause"],
+                cmd["resume"],
+                cmd["rtl"],
+                cmd["set_home"],
+                cmd["yaw_align"],
+            )
+        )
+        if should_publish_user_cmd:
             self.publish_user_cmd(cmd)
 
         if cmd["gimbal"]:
@@ -394,7 +442,8 @@ class Px4MqttHeartbeat(Node):
             f"connect={cmd['connect']} set_home={cmd['set_home']} arm={cmd['arm']} "
             f"pause={cmd['pause']} resume={cmd['resume']} rtl={cmd['rtl']} "
             f"mission={cmd['mission']} flag={cmd['flag']} "
-            f"gimbal={cmd['gimbal']} pitch={cmd['gimbal_pitch']} yaw={cmd['gimbal_yaw']}"
+            f"gimbal={cmd['gimbal']} pitch={cmd['gimbal_pitch']} yaw={cmd['gimbal_yaw']} "
+            f"yaw_align={cmd['yaw_align']} yaw_align_angle={cmd['yaw_align_angle']}"
         )
 
 #loss connect cloud check
@@ -504,10 +553,24 @@ class Px4MqttHeartbeat(Node):
         msg.resume = bool(cmd.get("resume"))
         msg.set_home = bool(cmd.get("set_home"))
 
+        yaw_align_active = bool(cmd.get("yaw_align"))
+        yaw_align_angle = cmd.get("yaw_align_angle")
+        if yaw_align_active and yaw_align_angle is not None:
+            try:
+                msg.yaw_align = bool(yaw_align_active)
+                msg.yaw_align_angle = float(yaw_align_angle)
+            except (TypeError, ValueError):
+                msg.yaw_align = bool(yaw_align_active)
+                msg.yaw_align_angle = 0.0
+        else:
+            msg.yaw_align = bool(yaw_align_active)
+            msg.yaw_align_angle = 0.0
+
         self.user_cmd_pub.publish(msg)
         self.get_logger().info(
             f"Published UserCmd arm={msg.arm} rth={msg.rth} pause={msg.pause} "
-            f"resume={msg.resume} set_home={msg.set_home} to '{self.user_cmd_topic}'"
+            f"resume={msg.resume} set_home={msg.set_home} yaw_align={msg.yaw_align} "
+            f"to '{self.user_cmd_topic}'"
         )
 
     def handle_gimbal_command(self, pitch: Optional[float], yaw: Optional[float]):
@@ -606,6 +669,30 @@ class Px4MqttHeartbeat(Node):
             "gps": gps_block,
         }
 
+    def publish_video_stream_event(self):
+        if not self.event_topic:
+            return
+
+        payload = {
+            "id": self.vehicle_id,
+            "type": "video_stream",
+            "value": self.payload_cfg.stream.video_value,
+            "flag": "",
+            "location": self._build_location(),
+            "timestamp": self._current_timestamp(),
+        }
+
+        try:
+            self.mqtt.publish(self.event_topic, json.dumps(payload), qos=1)
+        except Exception as exc:
+            self.get_logger().error(
+                f"MQTT video stream publish error to '{self.event_topic}': {exc}"
+            )
+        else:
+            self.get_logger().info(
+                f"Sent event 'video stream' value={self.payload_cfg.stream.video_value} to '{self.event_topic}'"
+            )
+
     def publish_event(self, event_type: str, value):
         if not self.event_topic or not value:
             return
@@ -647,6 +734,7 @@ class Px4MqttHeartbeat(Node):
             "resume",
             "rtl",
             "mission",
+            "yaw_align",
             "connect",
             "set_home",
         )
@@ -713,6 +801,7 @@ class Px4MqttHeartbeat(Node):
 
     # ---------- Shutdown ----------
     def destroy_node(self):
+        payload_stop_video_stream(logger=self.get_logger())
         try:
             self.mqtt.loop_stop()
             self.mqtt.disconnect()
