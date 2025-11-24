@@ -133,7 +133,7 @@ class Px4MqttHeartbeat(Node):
         # ---- Params ----
         self.vehicle_id   = self.declare_parameter("vehicle_id", "uav3").value
         self.mqtt_host    = self.declare_parameter(
-            "mqtt_host", "h1171119.ala.dedicated.aws.emqxcloud.com"
+            "mqtt_host", "i01606a6.ala.asia-southeast1.emqxsl.com"
         ).value
         self.mqtt_port    = self.declare_parameter("mqtt_port", 8883).value
         self.mqtt_user    = self.declare_parameter("mqtt_user", "nhutctuav").value
