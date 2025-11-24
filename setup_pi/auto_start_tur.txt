@@ -1,0 +1,53 @@
+de kich hoat uart 1 pin 8 10 # Kích hoạt UART0 tren Pin 8 (GPIO 14) va Pin 10 (GPIO 15)
+dtoverlay=uart0
+
+
+
+tao 1 file start_uav.sh nhu dinh kem
+
+chmod +x /home/ctuav3/start_uav.sh
+
+o terminal moi, cho phep chay scripts tren quyen sudo 
+
+sudo visudo
+ them vao cuoi (thay user khac )
+
+ ctuav3 ALL=(ALL) NOPASSWD: /usr/sbin/ethtool
+
+sau do tao service 
+
+sudo nano /etc/systemd/system/uav-autostart.service
+
+them vao r luu lai
+///////////////////
+
+# /etc/systemd/system/uav-autostart.service
+[Unit]
+Description=Auto start UAV ROS2 stack
+After=network-online.target NetworkManager.service serial-getty@ttyAMA0.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/ctuav3
+ExecStart=/home/ctuav3/start_uav.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+////////////
+Giải thích nhanh:
+
+    User=ctuav3 để nó chạy đúng môi trường user (vì bạn đang dùng $HOME/giam_sat_uav).
+
+    After=network-online.target để chờ mạng (nếu bạn cần PX4/RTPS qua mạng).
+
+    Restart=on-failure để node crash thì systemd kéo dậy lại.
+
+nap va bat len
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now uav-autostart.service

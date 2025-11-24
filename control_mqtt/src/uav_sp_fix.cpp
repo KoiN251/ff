@@ -44,6 +44,10 @@ float vx = 0.0, vy = 0.0, vz = 0;
 float roll_des = 0.0, pitch_des = 0.0, yaw_des = 0.0; // roll, pitch setpoint
 float roll = 0.0, pitch = 0.0, yaw = 0.0; // roll, pitch, yaw estimate
 
+
+float rtl_count = 0;
+float wp_count = 0;
+float yaw_align_count = 0;
 // State machine
 enum class State { NONE, IDLE, TAKEOFF, YAW_ALIGN, CRUISE, RTL, POS_MODE };
 State state_ = State::NONE;
@@ -203,7 +207,6 @@ void Subscription::uav_target_global_subscriber()
             tgt_alt = msg->alt_m;
 
             target_index = 0; //reset target khi nhan waypoint moi tu user
-
             state_ = State::IDLE; // reset state machine để thực hiện nhiệm vụ mới
 
             for (size_t i = 0; i < tgt_lat.size(); i++) {
@@ -237,27 +240,34 @@ void Subscription::uav_user_cmd_subscriber()
                 alt_hold = alt_cur;
                 yaw_hold = yaw;
                 state_ = State::POS_MODE;
+                wp_count = 0;
                 RCLCPP_INFO(this->get_logger(), "User command: Mission Pause");
             }
             //resume
             if (user_cmd_continue && state_ == State::POS_MODE) 
             {
+                wp_count = 0;
                 state_ = State::IDLE;
                 RCLCPP_INFO(this->get_logger(), "Continue mission");
             }      
             //RTL
             if (user_cmd_rtl) {
                 state_ = State::RTL;
+                rtl_count = 0;
                 RCLCPP_INFO(this->get_logger(), "User command: RTL");
             }
-            if((user_cmd_yaw_align) && (state_ == State::NONE)) 
+            if(user_cmd_yaw_align)
             {
-                RCLCPP_INFO(this->get_logger(),"start yaw_align");
-            }
-            else
-            {
-                RCLCPP_INFO(this->get_logger(),"cannot yaw_align");
-                user_cmd_yaw_align = false;
+                if(state_ == State::NONE){
+                    RCLCPP_INFO(this->get_logger(),"start yaw_align");
+                    yaw_align_count = 0;
+
+                }
+                else
+                {
+                    RCLCPP_INFO(this->get_logger(),"cannot yaw_align");
+                    user_cmd_yaw_align = false;
+                }
             }
             
 
@@ -355,6 +365,7 @@ class OffboardControl : public rclcpp::Node
         void event_update();
         void mission();
         void publish_vehicle_command(uint16_t command, float param1 = 0.0, float param2 = 0.0);
+        void publish_vehicle_command_hold_mode();
 
         void take_off(float alt_takeoff);
         void waypoint(float lat_wp, float lon_wp, float alt_wp, float yaw_wp);
@@ -433,7 +444,12 @@ void OffboardControl::position_setpoint()
             {
                 if(!land_detect)
                 {
-                    yaw_adjust(lat_cur, lon_cur, alt_cur, user_cmd_yaw_angle * M_PI/180);
+                    if (yaw_align_count < 5){
+                        publish_vehicle_command_hold_mode();
+                        yaw_adjust(lat_cur, lon_cur, alt_cur, user_cmd_yaw_angle * M_PI/180);
+                        RCLCPP_INFO(this->get_logger(),"yaw align : %.2f to %.2f degrees", yaw*180.0f/M_PI, user_cmd_yaw_angle);
+                        yaw_align_count += 1;
+                    }
 
                     if (std::fabs(user_cmd_yaw_angle - yaw) < 10*M_PI/180.0f) // 10 độ
                     {
@@ -467,7 +483,8 @@ void OffboardControl::position_setpoint()
                 lon_yaw_tgt = lon_cur;
                 yaw_ = yaw;
 
-                state_ = State::TAKEOFF;      
+                state_ = State::TAKEOFF; 
+                wp_count = 0;     
                 RCLCPP_INFO(this->get_logger(),"ready height adjust");
             }
 
@@ -479,9 +496,12 @@ void OffboardControl::position_setpoint()
             {
                 publish_vehicle_command(VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0f, 0.0f);
             }
+            if(wp_count < 5){
+                publish_vehicle_command_hold_mode();
                 alt_adjust(lat_yaw_tgt, lon_yaw_tgt, alt_takeoff, yaw_);
                 // RCLCPP_INFO(this->get_logger(),"height adjust");
-
+                wp_count += 1;
+            }
             if(std::fabs(alt_cur - alt_takeoff ) < 0.5f)
             {
                 // Face-to-target yaw từ vị trí hiện tại -> goal
@@ -494,12 +514,14 @@ void OffboardControl::position_setpoint()
         }
 
         case State::YAW_ALIGN: {
+            
 
             yaw_adjust(lat_yaw_tgt, lon_yaw_tgt, alt_takeoff, yaw_face);
 
             if (std::fabs(yaw_face - yaw) < 10*M_PI/180.0f) // 10 độ
             {
                 state_ = State::CRUISE;
+                wp_count = 0;
                 RCLCPP_INFO(this->get_logger(),"ready cruise");
             }
                 // RCLCPP_INFO(this->get_logger(),"yaw_align, yaw_face: %.2f, yaw_cur: %.2f", yaw_face*180.0f/M_PI, yaw*180.0f/M_PI);
@@ -507,9 +529,15 @@ void OffboardControl::position_setpoint()
         }
 
         case State::CRUISE: {
+            
 
-            waypoint(tgt_lat[target_index], tgt_lon[target_index], alt_takeoff, yaw_face);
+            if(wp_count < 5){
+                publish_vehicle_command_hold_mode();
+                waypoint(tgt_lat[target_index], tgt_lon[target_index], alt_takeoff, yaw_face);
                 // RCLCPP_INFO(this->get_logger(),"send waypoint ");
+                wp_count += 1;
+            }
+
 
             double distance_to_goal = haversine_distance(lat_cur, lon_cur, tgt_lat[target_index], tgt_lon[target_index]);
 
@@ -544,11 +572,16 @@ void OffboardControl::position_setpoint()
         case State::RTL: {
             payload_release = false;
             mission();
-            if (armed) {
+            if ((armed)&&(!land_detect)) {
+                if(rtl_count < 5) // dem 2s truoc khi RTL
+                {
+                    rtl_count += 1;
                 // RTL về home, thong so chinh trong para
                 return_to_launch();
-                // RCLCPP_INFO(this->get_logger(), "Returning to Launch (RTL)");
-            } else {
+                RCLCPP_INFO(this->get_logger(), "Returning to Launch (RTL)");
+                }
+            }
+            else {
                 RCLCPP_INFO(this->get_logger(), "Vehicle is disarmed, cannot RTL");
                 //set postion mode
         	    publish_vehicle_command(VehicleCommand::VEHICLE_CMD_DO_SET_MODE, 1, 3); 
@@ -557,8 +590,13 @@ void OffboardControl::position_setpoint()
             break;
         }
         case State::POS_MODE: {
-                yaw_adjust(lat_hold, lon_hold, alt_hold, yaw_hold);
-                RCLCPP_INFO(this->get_logger(), "Holding position");
+                if(wp_count < 5){
+                    publish_vehicle_command_hold_mode();
+                    yaw_adjust(lat_hold, lon_hold, alt_hold, yaw_hold);
+                    RCLCPP_INFO(this->get_logger(), "Holding position");
+                    wp_count += 1;
+                }
+
             break;
         }
     }
@@ -635,8 +673,8 @@ void OffboardControl::waypoint(float lat_wp, float lon_wp, float alt_wp, float y
     // param2 = bitmask
     // bit 0 (1<<0): đặt yaw
     // bit 1 (1<<1): yaw tính theo hướng tới WP (đặt 0 nếu muốn dùng param4)
-    // -> giữ nguyên yaw hiện tại: clear bit0 => mask = 0
-    cmd.param2 = 0.0f;
+    // -> dùng yaw tuyệt đối: set bit0 = 1, bit1 = 0 => mask = 1
+    cmd.param2 = 1.0f;
     // param3 = yaw rate (không dùng) -> NAN
     cmd.param3 = NAN;
     // param4 = yaw mong muốn (PX4 thường hiểu rad; nếu bạn đang đi MAVLink thuần là deg)
@@ -661,7 +699,7 @@ void OffboardControl::yaw_adjust(float lat_wp, float lon_wp, float alt_wp, float
     cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     cmd.command = VehicleCommand::VEHICLE_CMD_DO_REPOSITION;
     cmd.param1 = -1.0f; 
-    cmd.param2 = 1.0f;
+    cmd.param2 = 0.0f;
     cmd.param3 = NAN;
     cmd.param4 = yaw_wp ;
     cmd.param5 = lat_wp;
@@ -682,7 +720,7 @@ void OffboardControl::alt_adjust(float lat_wp, float lon_wp, float alt_wp, float
     cmd.timestamp = this->get_clock()->now().nanoseconds() / 1000;
     cmd.command = VehicleCommand::VEHICLE_CMD_DO_REPOSITION;
     cmd.param1 = -1.0f; 
-    cmd.param2 = 1.0f;
+    cmd.param2 = 0.0f;
     cmd.param3 = NAN;
     cmd.param4 = yaw_wp ;
     cmd.param5 = lat_wp;
@@ -704,6 +742,22 @@ void OffboardControl::publish_vehicle_command(uint16_t command, float param1, fl
     msg.command = command;
     msg.param1 = param1;
     msg.param2 = param2;
+    msg.target_system = 1;
+    msg.target_component = 1;
+    msg.source_system = 1;
+    msg.source_component = 1;
+    msg.from_external = true;
+
+    vehicle_command_publisher_->publish(msg);
+}
+void OffboardControl::publish_vehicle_command_hold_mode()
+{
+    VehicleCommand msg{};
+    msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+    msg.command = VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
+    msg.param1 = 1;
+    msg.param2 = 4;
+    msg.param3 = 3;
     msg.target_system = 1;
     msg.target_component = 1;
     msg.source_system = 1;

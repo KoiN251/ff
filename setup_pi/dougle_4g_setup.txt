@@ -1,0 +1,114 @@
+sau khi co sim dang ky goi 4g, cam module thong qua day usb
+
+kiem tra ket noi thiet bi 
+
+lsusb
+ ket qua : Bus 001 Device 005: ID 1e0e:9001 Qualcomm / Option SimTech, Incorporated
+
+ls /dev/ttyUSB* 
+ket qua : ttyUSB1 2 3 4 ,...
+
+setup module (su dung usb2)
+
+minicom -D /dev/ttyUSB2
+
+chay lenh 
+
+AT
+
+ket qua: OK
+=> ket noi duoc voi module
+
+AT+CUSBPIDSWITCH=9001,1,1
+ sau do rut ra cam lai de SIM7600 su dung che do ECM/RNDIS
+
+dung ifconfig de kiem tra ten cua thiet bi enx....
+
+ luc nay co the ket noi internet qua networking usb ethenet, nhung khong the pub/sub data len brocker
+ - do nha mang khong mo port 1883, 8883 ( rat hiem)
++ Đổi sang mạng Wi‑Fi bình thường thử nc -vz broker.emqx.io 1883 để chắc broker hoạt động.
++ Cắm SIM7600G qua Viettel, test nc -vz ở các cổng 1883/8883/443.
++ Nếu nc timeout nhưng AT+CIPOPEN=0,"TCP","host",port trả +CIPOPEN: 0,0, cổng chỉ bị chặn từ phía PC, không phải nhà mạng.
++ Kiểm tra modem đã attach mạng: AT+CGATT? phải là 1.
+ - Cấu Hình APN & Kích PDP
++ Đặt APN dữ liệu chung của Viettel: 
+AT+CGDCONT=1,"IP","v-internet"
+
++ Mở data theo firmware ECM: 
+AT+NETOPEN
+ket qua NETOPEN: 0 THI KHONG PHAI DO NHA MANG.
+
+Giải pháp: chuyển sang PPP (hoặc QMI). Giữ ECM chỉ khi firmware có NETCFG.
+sudo apt -install ppp
+
+Đặt lại PID: AT+CUSBPIDSWITCH=9001,1,1 
+(hoặc firmware tương đương PPP). Rút/cắm lại USB sau khi báo OK.
+
+ls /dev/ttyUSB* 
+phải thấy ít nhất ttyUSB0…ttyUSB3
+
+tao script quay so
+
+sudo mkdir -p /etc/chatscripts
+
+sudo tee /etc/ppp/peers/sim7600 >/dev/null <<'EOF'
+/dev/ttyUSB3 115200
+connect "/usr/sbin/chat -v -f /etc/chatscripts/sim7600"
+noauth
+defaultroute
+usepeerdns
+persist
+holdoff 5
+# nodetach   # bỏ nếu muốn pppd chạy nền
+EOF
+
+sudo tee /etc/chatscripts/sim7600 >/dev/null <<'EOF'
+ABORT "NO CARRIER"
+ABORT "ERROR"
+ABORT "NO DIALTONE"
+ABORT "BUSY"
+ABORT "NO ANSWER"
+TIMEOUT 20
+"" AT
+OK ATE0
+OK AT+CGDCONT=1,"IP","v-internet"
+OK ATD*99#
+CONNECT ""
+EOF
+
+
+sau do chay 
+sudo pppd call sim7600
+
+sau khi ppp0 len 
+
+PPP của bạn đã lên chuẩn (IP 29.54.124.89, ping 8.8.8.8 ok), 
+nên đường Internet thực tế đã hoạt động. 
+Nếu truy cập web vẫn lỗi thì hầu như chắc chắn do DNS.
+
+cat /etc/resolv.conf 
+xem có nameserver nào không. Với usepeerdns PPP nên ghi vào file, nhưng đôi khi NetworkManager ghi đè.
+Nếu file trống hoặc trỏ về 127.0.0.53, hãy thêm thủ công:
+
+sudo rm /etc/resolv.conf
+echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" | sudo tee /etc/resolv.conf
+
+Thử lại: curl --interface ppp0 https://ifconfig.me 
+
+hoặc mở trình duyệt (tắt Wi-Fi/LAN khác để chắc chắn đang dùng PPP).
+Nếu dùng NetworkManager, có thể cần sudo systemctl restart systemd-resolved 
+rồi tạo symlink 
+ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf.
+
+
+Vận Hành Hằng Ngày
+
+Mỗi lần reboot/cắm lại:
+Kiểm tra modem xuất hiện ttyUSB*.
+(Nếu modem reset) chạy 
+AT+CGDCONT=1,"IP","v-internet".
+
+sudo pppd call sim7600 persist holdoff 5
+
+Đảm bảo /etc/resolv.conf có DNS mong muốn.
+

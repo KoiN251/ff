@@ -1,0 +1,35 @@
+- Lệnh cài ethtool 
+	sudo apt update
+	sudo apt install ethtool -y
+- Set speed từ 100Mb/s xuống 10Mb/s ( lưu ý: nếu reboot lại pi5 thì nó sẽ reset lại thành 100Mb/s, nếu muốn set 10Mb/s luôn thì tạo file service)
+	sudo ethtool -s eth0 speed 10 duplex full autoneg off
+
+	- kiem tra xem laptop co phai eth0 : 
+	ip addr 
+	
+ - Kiểm tra xem đã xuống 10Mb/s chưa và link detect = yes chưa 
+ 	sudo ethtool eth0 | egrep 'Speed|Duplex|Auto|Link'
+
+- Cài phần mềm để làm việc với luồng video 
+	sudo apt update
+	sudo apt install ffmpeg -y	
+
+----------------- Chạy lên trên pi5 để forward rtsp trên pi5 ------------
+ffmpeg -hide_banner -nostdin -loglevel warning \
+  -rtsp_transport tcp -use_wallclock_as_timestamps 1 \
+  -i rtsp://192.168.144.25:8554/main.264 \
+  -fflags +genpts -c copy \
+  -f rtsp -rtsp_transport tcp \
+  rtsp://34.56.241.85:8554/a8_node2
+  
+ ------------------- Chạy lệnh trên laptop để xem luồng video -----------------
+	ffplay -rtsp_transport tcp rtsp://34.56.241.85:8554/a8_node2
+ 
+
+
+
+ffmpeg -hide_banner -nostdin -loglevel warning \
+  -f v4l2 -i /dev/video0 \
+  -fflags +genpts -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
+  -f rtsp -rtsp_transport tcp \
+  rtsp://34.56.241.85:8554/a8
